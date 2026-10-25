@@ -692,6 +692,9 @@ class TestGroupBatchFusion(TestCase):
             "contiguous_merge_view",
             "contiguous_output",
             "contiguous_as_strided_copy",
+            "setitem",
+            "view_setitem",
+            "call_module",
             "view_then_add",
             "view_then_memory_format",
             "leaky_relu",
@@ -747,6 +750,10 @@ class TestGroupBatchFusion(TestCase):
 
         def contiguous_output(graph, node):
             return graph.output(contiguous(graph, node))
+
+        def view_setitem(graph, node):
+            view = split_view(graph, node)
+            return graph.call_function(operator.setitem, args=(view, 0, 0))
 
         def contiguous_as_strided_copy(graph, node):
             copied = contiguous(graph, node)
@@ -904,6 +911,11 @@ class TestGroupBatchFusion(TestCase):
             "contiguous_merge_view": contiguous_merge_view,
             "contiguous_output": contiguous_output,
             "contiguous_as_strided_copy": contiguous_as_strided_copy,
+            "setitem": lambda graph, node: graph.call_function(
+                operator.setitem, args=(node, 0, 0)
+            ),
+            "view_setitem": view_setitem,
+            "call_module": lambda graph, node: graph.call_module("m", args=(node,)),
             "view_then_add": view_then_add,
             "view_then_memory_format": view_then_memory_format,
             "leaky_relu": lambda graph, node: graph.call_function(
@@ -1192,6 +1204,29 @@ class TestGroupBatchFusion(TestCase):
 
         module = M().eval()
         _check_lhs_fusion(self, module, [3], torch.randn(32, 64))
+
+    @_lhs_fusion_config
+    def test_batch_linear_lhs_skips_setitem(self):
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.large = torch.nn.Linear(64, 48, bias=False)
+                self.a = torch.nn.Linear(64, 16, bias=False)
+                self.b = torch.nn.Linear(64, 16, bias=False)
+
+            def forward(self, x):
+                large = self.large(x)
+                view = large.view(32, 4, 12)
+                view[0] = 0
+                return (
+                    torch.sin(view),
+                    torch.cos(large),
+                    torch.sin(self.a(x)),
+                    torch.cos(self.b(x)),
+                )
+
+        module = M().eval()
+        _check_lhs_fusion(self, module, [2], torch.randn(32, 64))
 
     @parametrize("bias_shape", [(1, 6), (1,), (6,)])
     def test_batch_linear_lhs_rejects_broadcast_bias(self, bias_shape):

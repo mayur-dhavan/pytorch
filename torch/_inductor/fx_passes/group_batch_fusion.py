@@ -565,6 +565,7 @@ class BatchLinearLHSFusion(BatchFusion):
                 layout_sensitive = _has_layout_sensitive_user(node)
                 self._layout_sensitive_users[node] = layout_sensitive
             if layout_sensitive:
+                log.debug("batch_linear_lhs: rejecting linear %s", node)
                 return None
             group_key = ("batch_linear_lhs", bias is not None, input)
         else:
@@ -961,10 +962,6 @@ def _contiguous_aliases(user: torch.fx.Node) -> bool:
 def _target_is_mutable(target):
     if isinstance(target, torch._ops.OpOverload):
         return target._schema.is_mutable
-    if isinstance(target, torch._ops.OpOverloadPacket):
-        return any(
-            getattr(target, name)._schema.is_mutable for name in target.overloads()
-        )
     return None
 
 
@@ -973,13 +970,13 @@ def _direct_is_mutable(user: torch.fx.Node, op) -> bool:
         return False
     if user.op == "call_function" and user.target is operator.getitem:
         return False
-    target_mutable = _target_is_mutable(user.target)
-    if target_mutable is not None:
-        return target_mutable
     if op is not None:
         if op._schema.is_mutable:
             return True
         return _is_mutable_node(user.target)
+    target_mutable = _target_is_mutable(user.target)
+    if target_mutable is not None:
+        return target_mutable
     if user.op == "call_function":
         # No resolvable schema: operator.setitem, HigherOrderOperator, or
         # another opaque callable. Assume it may mutate rather than miss a
@@ -1152,6 +1149,11 @@ def _layout_sensitive_after_alias(user: torch.fx.Node, op) -> bool:
     )
 
 
+def _reject_layout(user: torch.fx.Node) -> bool:
+    log.debug("batch_linear_lhs: layout-sensitive user %s", user.target)
+    return True
+
+
 def _has_layout_sensitive_user(node: torch.fx.Node) -> bool:
     """True if any consumer, including one behind an alias, is unsafe."""
     pending = [(user, False) for user in node.users]
@@ -1168,18 +1170,18 @@ def _has_layout_sensitive_user(node: torch.fx.Node) -> bool:
             else None
         )
         if behind_alias and _layout_sensitive_after_alias(user, op):
-            return True
+            return _reject_layout(user)
         if _is_contiguous_user(user, op):
             if not _contiguous_aliases(user):
-                return True
+                return _reject_layout(user)
             if _is_aliasing_user(user, assume_alias=True):
                 if _has_mutable_alias_user(user) or _has_storage_sensitive_user(user):
-                    return True
+                    return _reject_layout(user)
             continue
         if _allowed_alias(user, op):
             pending.extend((next_user, True) for next_user in user.users)
         elif _direct_layout_user_is_sensitive(user, op):
-            return True
+            return _reject_layout(user)
         elif _is_aliasing_user(user, assume_alias=True):
             pending.extend((next_user, True) for next_user in user.users)
     return False
