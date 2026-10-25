@@ -958,11 +958,24 @@ def _contiguous_aliases(user: torch.fx.Node) -> bool:
     return _memory_format(user) in (None, torch.contiguous_format)
 
 
+def _target_is_mutable(target):
+    if isinstance(target, torch._ops.OpOverload):
+        return target._schema.is_mutable
+    if isinstance(target, torch._ops.OpOverloadPacket):
+        return any(
+            getattr(target, name)._schema.is_mutable for name in target.overloads()
+        )
+    return None
+
+
 def _direct_is_mutable(user: torch.fx.Node, op) -> bool:
     if user.op not in ("call_method", "call_function"):
         return False
     if user.op == "call_function" and user.target is operator.getitem:
         return False
+    target_mutable = _target_is_mutable(user.target)
+    if target_mutable is not None:
+        return target_mutable
     if op is not None:
         if op._schema.is_mutable:
             return True
@@ -1040,10 +1053,14 @@ def _is_aliasing_user(user: torch.fx.Node, assume_alias: bool = False) -> bool:
 
 _STORAGE_SENSITIVE_OPS = OrderedSet(
     [
-        # A row view such as b[1].contiguous() can read neighboring storage
-        # through as_strided, and its storage offset differs from the copy.
+        # A row view such as b[1].contiguous() can read neighboring storage,
+        # and its storage offset differs from the copy. Keep this list in sync
+        # with the storage readers in _LAYOUT_SENSITIVE_OPS.
         "as_strided",
+        "as_strided_copy",
         "storage_offset",
+        "sym_storage_offset",
+        "_reshape_alias",
         "is_set_to",
         "_has_same_storage_numel",
     ]

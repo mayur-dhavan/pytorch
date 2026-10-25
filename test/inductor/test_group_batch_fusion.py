@@ -691,6 +691,7 @@ class TestGroupBatchFusion(TestCase):
             "view_then_cat",
             "contiguous_merge_view",
             "contiguous_output",
+            "contiguous_as_strided_copy",
             "view_then_add",
             "view_then_memory_format",
             "leaky_relu",
@@ -746,6 +747,15 @@ class TestGroupBatchFusion(TestCase):
 
         def contiguous_output(graph, node):
             return graph.output(contiguous(graph, node))
+
+        def contiguous_as_strided_copy(graph, node):
+            copied = contiguous(graph, node)
+            result = graph.call_function(
+                torch.ops.aten.as_strided_copy.default,
+                args=(copied, (4, 6), (6, 1)),
+            )
+            result.meta["example_value"] = copied.meta["example_value"].clone()
+            return result
 
         def transpose(graph, node):
             result = graph.call_method("transpose", args=(node, 0, 1))
@@ -893,6 +903,7 @@ class TestGroupBatchFusion(TestCase):
             "view_then_cat": view_then_cat,
             "contiguous_merge_view": contiguous_merge_view,
             "contiguous_output": contiguous_output,
+            "contiguous_as_strided_copy": contiguous_as_strided_copy,
             "view_then_add": view_then_add,
             "view_then_memory_format": view_then_memory_format,
             "leaky_relu": lambda graph, node: graph.call_function(
@@ -1163,6 +1174,24 @@ class TestGroupBatchFusion(TestCase):
 
         module = M().eval()
         _check_lhs_fusion(self, module, [2], torch.randn(32, 64))
+
+    @_lhs_fusion_config
+    def test_batch_linear_lhs_keeps_contiguous_fusion(self):
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj_large = torch.nn.Linear(64, 192, bias=False)
+                self.proj_a = torch.nn.Linear(64, 16, bias=False)
+                self.proj_b = torch.nn.Linear(64, 16, bias=False)
+
+            def forward(self, x):
+                large = _require_contiguous(self.proj_large(x).contiguous())
+                a = _require_contiguous(self.proj_a(x).contiguous())
+                b = _require_contiguous(self.proj_b(x).contiguous())
+                return torch.cat((large, a, b), dim=1)
+
+        module = M().eval()
+        _check_lhs_fusion(self, module, [3], torch.randn(32, 64))
 
     @parametrize("bias_shape", [(1, 6), (1,), (6,)])
     def test_batch_linear_lhs_rejects_broadcast_bias(self, bias_shape):
