@@ -1158,7 +1158,6 @@ def _has_layout_sensitive_user(node: torch.fx.Node) -> bool:
             if _is_aliasing_user(user, assume_alias=True):
                 if _has_mutable_alias_user(user) or _has_storage_sensitive_user(user):
                     return True
-                pending.extend((next_user, True) for next_user in user.users)
             continue
         if _allowed_alias(user, op):
             pending.extend((next_user, True) for next_user in user.users)
