@@ -837,9 +837,7 @@ class TestGroupBatchFusion(TestCase):
             result = graph.call_method(
                 "to", args=(view,), kwargs={"memory_format": torch.contiguous_format}
             )
-            result.meta["example_value"] = view.meta["example_value"].clone(
-                memory_format=torch.contiguous_format
-            )
+            result.meta["example_value"] = view.meta["example_value"]
             return result
 
         def custom_contiguous(graph, node):
@@ -1010,7 +1008,6 @@ class TestGroupBatchFusion(TestCase):
             "tensor_split",
             "leaky_relu",
             "elu_inplace_false",
-            "view_then_cat",
             "view_then_add",
             "contiguous_merge_view",
             "contiguous_output",
@@ -1020,6 +1017,24 @@ class TestGroupBatchFusion(TestCase):
         linear = graph.placeholder("linear")
         linear.meta["example_value"] = torch.randn(4, 6)
         builders[case](graph, linear)
+        if case != "no_metadata_alias":
+            inputs = []
+            for placeholder in graph.nodes:
+                if placeholder.op != "placeholder":
+                    continue
+                value = placeholder.meta.get("example_value")
+                if value is None:
+                    inputs = None
+                    break
+                inputs.append(torch.empty_like(value))
+            if inputs is not None:
+                from torch.fx.passes.fake_tensor_prop import FakeTensorProp
+
+                try:
+                    graph_module = torch.fx.GraphModule({}, graph)
+                    FakeTensorProp(graph_module).propagate(*inputs)
+                except Exception:
+                    pass
         self.assertEqual(_has_layout_sensitive_user(linear), case not in safe)
 
     @parametrize("op", ["add_tensor", "add_scalar", "mul_scalar"])

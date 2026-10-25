@@ -1139,13 +1139,17 @@ def _direct_layout_user_is_sensitive(user: torch.fx.Node, op) -> bool:
 
 
 def _layout_sensitive_after_alias(user: torch.fx.Node, op) -> bool:
-    # cat/stack and TensorIterator pointwise ops derive the output layout from
-    # operand stride order, which split-only views and transpose preserve.
-    # memory_format copies instead consult size-1 strides, which can differ.
+    if _is_conversion_user(user, op):
+        memory_format = user.kwargs.get("memory_format")
+        return memory_format is not None and memory_format is not torch.preserve_format
     if op is None:
         return False
-    return op.overloadpacket.__name__ in ("_to_copy", "to", "type_as") and bool(
-        user.kwargs.get("memory_format")
+    # cat/stack/pad consult size-1 strides when choosing a memory format.
+    return op.overloadpacket.__name__ in (
+        "cat",
+        "stack",
+        "pad",
+        "constant_pad_nd",
     )
 
 
@@ -1187,6 +1191,8 @@ def _has_layout_sensitive_user(node: torch.fx.Node) -> bool:
     return False
 
 
+# Poor person's check for if a node in the graph mutates its input.
+# (the graph is torch IR, so we will see torch fns and python operators)
 def _is_mutable_node(tgt):
     if str(tgt).endswith("_"):
         # e.g. torch.mul_, torch.Tensor.mul_
